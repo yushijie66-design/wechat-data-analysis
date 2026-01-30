@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 
 # -------------------------------------------------------------------
-# 微信小店数据分析工具 - v5.0 (修正发货逻辑 & 净化大单统计)
+# 微信小店数据分析工具 - v6.0 (新增渠道/主播业绩透视)
+# 功能：全维度资金 + 渠道区分 + 双重退款率 + 有效订单复购分析
 # -------------------------------------------------------------------
 
 st.set_page_config(page_title="微信小店数据分析助手 Pro Max", layout="wide")
 
 st.title("📊 微信小店深度销售分析")
-st.markdown("👉 **支持全维度资金统计、双重退款率，并自动剔除无效订单进行大单/复购透视。**")
+st.markdown("👉 **支持按【商家编码】区分主播/渠道业绩，保留全维度资金与退款分析。**")
 
 # 1. 文件上传
 uploaded_file = st.file_uploader("请将 CSV 或 Excel 文件拖入下方框中", type=['csv', 'xlsx'])
@@ -30,6 +31,21 @@ if uploaded_file is not None:
         df['商品名称'] = df['商品名称'].fillna('未知商品')
         df['订单状态'] = df['订单状态'].fillna('未知')
         
+        # 尝试自动识别商家编码列 (微信导出通常叫 '商品编码(自定义)')
+        code_col = '商品编码(自定义)'
+        if code_col not in df.columns:
+            # 如果没找到，尝试找类似的列名
+            possible_cols = ['商家编码', 'SKU编码(自定义)']
+            for col in possible_cols:
+                if col in df.columns:
+                    code_col = col
+                    break
+        
+        # 填充编码列，方便后续统计
+        if code_col in df.columns:
+            df[code_col] = df[code_col].fillna('未标记渠道')
+            df[code_col] = df[code_col].astype(str).replace(['nan', ''], '未标记渠道')
+
         # 数值列强制转换
         cols_to_numeric = ['商品数量', '商品已退款金额', '商品实际价格(总共)', '订单实际支付金额']
         for col in cols_to_numeric:
@@ -41,7 +57,7 @@ if uploaded_file is not None:
         if '商品数量' not in df.columns:
             df['商品数量'] = 1
 
-        # 4. 核心指标计算 (全局统计，保持原有逻辑)
+        # 4. 核心指标计算 (全局)
         total_orders = len(df)
         total_gmv = df['商品实际价格(总共)'].sum() 
 
@@ -51,14 +67,11 @@ if uploaded_file is not None:
         refund_count = len(refund_df)
         refund_amount = df['商品已退款金额'].sum()
 
-        # --- B. 物流状态统计 (修正点：加入'已完成') ---
-        # 待发货
+        # --- B. 物流状态统计 (含已完成) ---
         to_ship_df = df[df['订单状态'] == '待发货']
         to_ship_count = len(to_ship_df)
         to_ship_amount = to_ship_df['商品实际价格(总共)'].sum()
 
-        # 已发货 (修正：包含 '已发货' 和 '已完成')
-        # 注意：有时候'已完成'是指交易完成，肯定发过货了
         shipped_df = df[df['订单状态'].isin(['已发货', '已完成'])]
         shipped_count = len(shipped_df)
         shipped_amount = shipped_df['商品实际价格(总共)'].sum()
@@ -68,10 +81,9 @@ if uploaded_file is not None:
         rate_amount = (refund_amount / total_gmv * 100) if total_gmv > 0 else 0
 
         # ==========================================
-        # 🔥 核心看板
+        # 🔥 模块1：核心看板
         # ==========================================
         st.markdown("### 💰 核心经营数据详解")
-        
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("📦 总订单量", f"{total_orders} 单")
         c2.metric("💰 总成交金额 (GMV)", f"¥ {total_gmv:,.0f}")
@@ -85,12 +97,10 @@ if uploaded_file is not None:
             st.info(f"**⏳ 待发货 (急)**")
             st.write(f"数量：**{to_ship_count}** 单")
             st.write(f"金额：**¥ {to_ship_amount:,.0f}**")
-        
         with k2:
             st.success(f"**🚚 已发货 / 已完成**")
             st.write(f"数量：**{shipped_count}** 单")
             st.write(f"金额：**¥ {shipped_amount:,.0f}**")
-        
         with k3:
             st.error(f"**❌ 已退款**")
             st.write(f"数量：**{refund_count}** 单")
@@ -99,45 +109,73 @@ if uploaded_file is not None:
         st.divider()
 
         # ==========================================
-        # 🔥 多单与复购分析 (修正点：只统计付款且未退款的有效订单)
+        # 🔥 模块2：主播/渠道业绩分析 (新增功能)
         # ==========================================
-        
-        # 1. 筛选有效订单：
-        # 条件：订单状态不为'已取消' (排除未付款取消)  AND  没有发生退款 (排除售后)
+        st.markdown("### 🎬 主播/渠道业绩分析 (按商家编码)")
+        st.caption("💡 统计逻辑：根据表格中的【商品编码(自定义)】进行分类，方便区分不同主播或中控的业绩。")
+
+        if code_col in df.columns:
+            # 按编码分组统计
+            channel_stats = df.groupby(code_col).agg({
+                '订单号': 'count',
+                '商品数量': 'sum',
+                '商品实际价格(总共)': 'sum',
+                '商品已退款金额': 'sum'
+            }).rename(columns={
+                '订单号': '成交单数',
+                '商品数量': '销售总份数',
+                '商品实际价格(总共)': '成交总金额',
+                '商品已退款金额': '退款总金额'
+            })
+
+            # 计算渠道退款率
+            channel_stats['金额退款率'] = (channel_stats['退款总金额'] / channel_stats['成交总金额'] * 100).fillna(0)
+            
+            # 按金额排序
+            channel_stats = channel_stats.sort_values(by='成交总金额', ascending=False)
+            
+            # 格式化展示
+            channel_display = channel_stats.copy()
+            channel_display['金额退款率'] = channel_display['金额退款率'].apply(lambda x: f"{x:.2f}%")
+            channel_display['成交总金额'] = channel_display['成交总金额'].apply(lambda x: f"¥{x:,.0f}")
+            channel_display['退款总金额'] = channel_display['退款总金额'].apply(lambda x: f"¥{x:,.0f}")
+
+            st.dataframe(
+                channel_display,
+                column_config={
+                    "成交总金额": st.column_config.TextColumn("总成交金额 💰"),
+                    "金额退款率": st.column_config.TextColumn("金额退款率 ⚠️"),
+                },
+                use_container_width=True
+            )
+        else:
+            st.warning("⚠️ 表格中未找到【商品编码(自定义)】列，无法自动分析渠道业绩。")
+
+        st.divider()
+
+        # ==========================================
+        # 🔥 模块3：有效大单与复购分析
+        # ==========================================
+        # 筛选有效订单 (已付款且无退款)
         valid_orders_mask = (df['订单状态'] != '已取消') & (~refund_mask)
         valid_orders_df = df[valid_orders_mask].copy()
 
         col_left, col_right = st.columns(2)
 
-        # 左侧：一次买多份 (使用有效订单统计)
         with col_left:
-            st.markdown("### 🛍️ 有效大单 (已付款且无退款)")
-            st.caption(f"统计范围：单次购买份数 > 1 的有效成交订单")
-            
+            st.markdown("### 🛍️ 有效大单 (已付款无退款)")
             multi_item_orders = valid_orders_df[valid_orders_df['商品数量'] > 1]
-            
             if not multi_item_orders.empty:
-                st.info(f"发现 **{len(multi_item_orders)}** 个有效大单：")
+                st.info(f"发现 **{len(multi_item_orders)}** 个有效大单 (份数>1)：")
                 multi_item_orders = multi_item_orders.sort_values(by='商品数量', ascending=False)
-                
-                show_cols = ['商品数量', '商品名称', '收件人姓名', '订单实际支付金额']
+                show_cols = ['商品数量', '商品名称', '收件人姓名', '订单实际支付金额', code_col] # 把渠道也显示出来
                 valid_cols = [c for c in show_cols if c in df.columns]
-                st.dataframe(
-                    multi_item_orders[valid_cols],
-                    column_config={
-                        "商品数量": st.column_config.NumberColumn("份数", format="%d 份"),
-                        "订单实际支付金额": st.column_config.NumberColumn("实付", format="¥%d"),
-                    },
-                    use_container_width=True, hide_index=True
-                )
+                st.dataframe(multi_item_orders[valid_cols], use_container_width=True, hide_index=True)
             else:
                 st.success("✅ 暂无购买多份的有效订单。")
 
-        # 右侧：复购分析 (使用有效订单统计)
         with col_right:
             st.markdown("### 🔄 有效复购 (回头客)")
-            st.caption(f"统计范围：下单次数 > 1 的客户 (仅统计已付款未退款的单子)")
-            
             if '收件人姓名' in df.columns and '收件人手机' in df.columns:
                 valid_orders_df['客户标识'] = valid_orders_df['收件人姓名'].astype(str) + valid_orders_df['收件人手机'].astype(str)
                 customer_counts = valid_orders_df['客户标识'].value_counts()
@@ -147,7 +185,6 @@ if uploaded_file is not None:
                     st.warning(f"发现 **{len(repeat_customers)}** 位高价值回头客：")
                     repeat_list = []
                     for cust_id, count in repeat_customers.items():
-                        # 获取客户信息
                         record = valid_orders_df[valid_orders_df['客户标识'] == cust_id].iloc[0]
                         repeat_list.append({
                             "收件人": record['收件人姓名'],
@@ -158,12 +195,12 @@ if uploaded_file is not None:
                 else:
                     st.success("✅ 暂无有效复购客户。")
             else:
-                st.write("⚠️ 缺少客户信息列，无法分析复购。")
+                st.write("⚠️ 缺少客户信息列。")
 
         st.divider()
 
         # ==========================================
-        # 🔥 商品总榜
+        # 🔥 模块4：商品总榜
         # ==========================================
         st.markdown("### 🏆 商品销售总榜")
         product_analysis = df.groupby('商品名称').agg({
@@ -173,29 +210,18 @@ if uploaded_file is not None:
             '商品实际价格(总共)': 'sum'
         }).rename(columns={'订单号': '成交单数', '商品数量': '销售总份数'})
         
-        # 计算双重退款率
         product_analysis['金额退款率'] = (product_analysis['商品已退款金额'] / product_analysis['商品实际价格(总共)'] * 100).fillna(0)
-        
         refund_counts_by_product = df[refund_mask].groupby('商品名称')['订单号'].count()
-        product_analysis['退款单数'] = refund_counts_by_product
-        product_analysis['退款单数'] = product_analysis['退款单数'].fillna(0)
+        product_analysis['退款单数'] = refund_counts_by_product.fillna(0)
         product_analysis['单量退款率'] = (product_analysis['退款单数'] / product_analysis['成交单数'] * 100).fillna(0)
-
+        
         product_analysis = product_analysis.sort_values(by='销售总份数', ascending=False)
         
-        # 格式化
         display_df = product_analysis.copy()
         display_df['金额退款率'] = display_df['金额退款率'].apply(lambda x: f"{x:.2f}%")
         display_df['单量退款率'] = display_df['单量退款率'].apply(lambda x: f"{x:.2f}%")
         
-        st.dataframe(
-            display_df[['成交单数', '销售总份数', '单量退款率', '金额退款率']], 
-            column_config={
-                "单量退款率": st.column_config.TextColumn("单量退款率 📦"),
-                "金额退款率": st.column_config.TextColumn("金额退款率 💰"),
-            },
-            use_container_width=True
-        )
+        st.dataframe(display_df[['成交单数', '销售总份数', '单量退款率', '金额退款率']], use_container_width=True)
 
     except Exception as e:
         st.error(f"分析出错: {e}")
