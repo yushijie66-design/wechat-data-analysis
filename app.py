@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 
 # -------------------------------------------------------------------
-# 微信小店数据分析工具 - v13.0 (精准打击刷单版)
+# 微信小店数据分析工具 - v15.0 (大单逻辑回归：仅按份数)
 # -------------------------------------------------------------------
 
 st.set_page_config(page_title="微信小店数据分析助手 Pro Max", layout="wide")
 
 st.title("📊 微信小店深度销售分析")
-st.markdown("👉 **v13.0升级：按【手机号】识别，且涵盖【高频高退款率】(>80%) 的刷单账号，防止漏网之鱼。**")
+st.markdown("👉 **v15.0升级：【有效大单】仅统计单笔购买份数 > 1 的订单；保留智能刷单剔除功能。**")
 
 # 1. 文件上传
 uploaded_file = st.file_uploader("请将 CSV 或 Excel 文件拖入下方框中", type=['csv', 'xlsx'])
@@ -59,33 +59,25 @@ if uploaded_file is not None:
             raw_df['商品数量'] = 1
 
         # ==========================================
-        # 3️⃣ 🕵️‍♂️ 智能刷单识别 (算法升级)
+        # 3️⃣ 🕵️‍♂️ 智能刷单识别 (精准版)
         # ==========================================
-        
-        # 规则1：按【收件人手机】识别唯一用户 (忽略姓名变化)
         if '收件人手机' in raw_df.columns:
-            # 去除空格，保证匹配准确
             raw_df['clean_phone'] = raw_df['收件人手机'].astype(str).str.strip()
         else:
-            # 如果没有手机号，回退到姓名 (不推荐，但防止报错)
             raw_df['clean_phone'] = raw_df['收件人姓名'].astype(str)
 
-        # 标记是否退款
         raw_df['is_refund_flag'] = (
             (raw_df['商品售后'].str.contains('退款完成', na=False)) | 
             (raw_df['商品已退款金额'] > 0)
         )
 
-        # 统计每个手机号的行为
+        # 统计行为
         user_stats = raw_df.groupby('clean_phone').agg(
-            total_count=('订单号', 'count'),          # 总单数
-            refund_count=('is_refund_flag', 'sum'),   # 退款单数
-            linked_names=('收件人姓名', 'unique')     # 关联的所有姓名
+            total_count=('订单号', 'count'),
+            refund_count=('is_refund_flag', 'sum')
         ).reset_index()
 
-        # 规则2：判定标准升级
-        # 满足：下单次数 >= 3 且 退款率 >= 80% (0.8)
-        # 这样可以抓住那些 56单退了52单 的人
+        # 判定刷单：下单 >=3 且 退款率 >= 80%
         brushing_users = user_stats[
             (user_stats['total_count'] >= 3) & 
             ((user_stats['refund_count'] / user_stats['total_count']) >= 0.8)
@@ -96,44 +88,18 @@ if uploaded_file is not None:
         # 数据隔离
         brushing_df = raw_df[raw_df['clean_phone'].isin(brushing_phones)].copy()
         clean_df = raw_df[~raw_df['clean_phone'].isin(brushing_phones)].copy()
-
-        # 记录数据
-        removed_orders_count = len(brushing_df)
-        removed_users_count = len(brushing_users)
-
-        # 📢 刷单警告区
-        if not brushing_df.empty:
-            st.warning(f"⚠️ **已智能剔除刷单数据**：共发现 **{removed_users_count}** 个异常手机号，涉及 **{removed_orders_count}** 个订单。")
-            
-            with st.expander("🔍 点击查看刷单“黑名单” (姓名/手机/单量)"):
-                st.markdown("**判定标准**：同一手机号下单 ≥ 3次，且退款率超过 80%。")
-                
-                # 整理展示数据
-                show_users = brushing_users.copy()
-                show_users['退款率'] = (show_users['refund_count'] / show_users['total_count'] * 100).apply(lambda x: f"{x:.1f}%")
-                # 把姓名列表转成字符串
-                show_users['曾用名'] = show_users['linked_names'].apply(lambda x: ','.join([str(n) for n in x]))
-                
-                st.dataframe(
-                    show_users[['clean_phone', '曾用名', 'total_count', 'refund_count', '退款率']].rename(columns={
-                        'clean_phone': '手机号',
-                        'total_count': '总下单',
-                        'refund_count': '总退款'
-                    }),
-                    use_container_width=True,
-                    hide_index=True
-                )
-                
-                st.markdown("#### 🧾 对应的异常订单明细")
-                st.dataframe(brushing_df[['订单号', '收件人姓名', '收件人手机', '订单状态', '商品售后', '订单实际支付金额']])
-        else:
-            st.success("✅ 未检测到【高频高退款】的异常刷单数据。")
-
-
-        # ==========================================
-        # 4️⃣ 构建分析数据集 (Paid Orders from Clean Data)
-        # ==========================================
         
+        removed_orders_count = len(brushing_df)
+
+        # 刷单警告
+        if not brushing_df.empty:
+            st.warning(f"⚠️ **已智能剔除刷单数据**：共发现 **{len(brushing_users)}** 个异常手机号，涉及 **{removed_orders_count}** 个订单。")
+            with st.expander("🔍 点击查看刷单“黑名单”"):
+                st.dataframe(brushing_users.rename(columns={'clean_phone':'手机号', 'total_count':'总单数', 'refund_count':'退款数'}))
+
+        # ==========================================
+        # 4️⃣ 构建分析数据集 (Paid Orders)
+        # ==========================================
         real_paid_mask = (
             clean_df['订单状态'].isin(['待发货', '已发货', '已完成']) |
             (clean_df['商品已退款金额'] > 0) |
@@ -189,7 +155,6 @@ if uploaded_file is not None:
 
         # --- 模块2：渠道业绩透视 ---
         st.markdown(f"### 🎬 主播/渠道业绩透视 (已剔除 {removed_orders_count} 条刷单)")
-        
         if code_col in clean_df.columns:
             channel_stats = paid_orders.groupby(code_col).apply(
                 lambda x: pd.Series({
@@ -231,18 +196,28 @@ if uploaded_file is not None:
         
         col_left, col_right = st.columns(2)
         with col_left:
+            # 🔥 回归纯份数逻辑
             st.markdown("#### 有效大单 (净成交)")
+            st.caption("判定标准：单笔购买份数 > 1 (即 ≥ 2份)")
+            
             multi = valid_orders_df[valid_orders_df['商品数量'] > 1]
+            
             if not multi.empty:
                 st.info(f"发现 **{len(multi)}** 个有效大单")
-                st.dataframe(multi[['商品数量', '商品名称', '收件人姓名', '订单实际支付金额', code_col]], hide_index=True)
+                multi = multi.sort_values(by='商品数量', ascending=False)
+                st.dataframe(
+                    multi[['商品数量', '商品名称', '收件人姓名', '订单实际支付金额', code_col]], 
+                    hide_index=True,
+                    column_config={
+                        "商品数量": st.column_config.NumberColumn("份数", format="%d 份")
+                    }
+                )
             else:
                 st.success("暂无。")
 
         with col_right:
             st.markdown("#### 有效复购 (回头客)")
             if '收件人手机' in clean_df.columns:
-                # 仅在干净数据里找回头客
                 valid_orders_df['clean_phone'] = valid_orders_df['收件人手机'].astype(str).str.strip()
                 counts = valid_orders_df['clean_phone'].value_counts()
                 repeat = counts[counts > 1]
