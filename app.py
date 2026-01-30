@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 
 # -------------------------------------------------------------------
-# 微信小店数据分析工具 - v8.0 (修正退款在已取消里的问题)
+# 微信小店数据分析工具 - v9.0 (渠道分析：总支付+净成交 双维度)
 # -------------------------------------------------------------------
 
 st.set_page_config(page_title="微信小店数据分析助手 Pro Max", layout="wide")
 
 st.title("📊 微信小店深度销售分析")
-st.markdown("👉 **已修正逻辑：包含【已取消但退款成功】的订单，准确计算渠道退款率。**")
+st.markdown("👉 **新增：渠道分析同时展示【支付总单量(含退)】和【实际净成交(扣退)】，满足不同考核需求。**")
 
 # 1. 文件上传
 uploaded_file = st.file_uploader("请将 CSV 或 Excel 文件拖入下方框中", type=['csv', 'xlsx'])
@@ -54,7 +54,7 @@ if uploaded_file is not None:
         if '商品数量' not in df.columns:
             df['商品数量'] = 1
 
-        # 4. 全局核心指标 (顶部看板)
+        # 4. 全局核心指标
         total_orders = len(df)
         total_gmv = df['商品实际价格(总共)'].sum() 
 
@@ -106,63 +106,65 @@ if uploaded_file is not None:
         st.divider()
 
         # ==========================================
-        # 🔥 模块2：主播/渠道业绩分析 (修正版)
+        # 🔥 模块2：主播/渠道业绩透视 (双维度展示)
         # ==========================================
         st.markdown("### 🎬 主播/渠道业绩透视 (按商家编码)")
-        st.caption("✅ **统计逻辑已修正**：只要【付过款】就算入统计（无论状态是否为已取消）。这样【付款后退款】的订单也会正确计入退款率。")
+        st.caption("✅ **已优化字段名**：【支付总单量】包含退款（看带货能力），【实际净成交】扣除退款（看实际业绩）。")
 
         if code_col in df.columns:
-            # ----------------------------------------------------
-            # 核心修正：如何筛选“付过款”的订单？
-            # 1. 订单实际支付金额 > 0 (正常付款)
-            # 2. 或者 商品已退款金额 > 0 (付款后全额退款，可能支付金额显式为0或被退回，但退款金额会有记录)
-            # 3. 或者 状态是 待发货/已发货/已完成 (肯定付过款)
-            # ----------------------------------------------------
-            
+            # 1. 筛选“真金白银”付过款的订单 (排除未付款取消)
             is_paid = (df['订单实际支付金额'] > 0) | \
                       (df['商品已退款金额'] > 0) | \
                       (df['订单状态'].isin(['待发货', '已发货', '已完成']))
             
-            # 拿到所有“真金白银”相关的单子
             paid_orders = df[is_paid].copy()
             
-            # 在这些单子里，标记谁退款了
+            # 2. 标记退款
             paid_orders['是否退款'] = (paid_orders['商品售后'].str.contains('退款完成', na=False)) | (paid_orders['商品已退款金额'] > 0)
             
-            # 标记谁是有效成交 (付过款 且 没退款)
+            # 3. 标记净成交 (付了钱且没退)
             paid_orders['是否有效'] = ~paid_orders['是否退款']
 
-            # 按渠道分组统计
+            # 4. 分组统计
             channel_stats = paid_orders.groupby(code_col).apply(
                 lambda x: pd.Series({
-                    '有效成交单数': x[x['是否有效']]['订单号'].count(),      # 净单量
-                    '有效成交金额': x[x['是否有效']]['商品实际价格(总共)'].sum(), # 净营收
-                    '退款单数': x[x['是否退款']]['订单号'].count(),        # 退款单量
-                    '退款金额': x['商品已退款金额'].sum(),                 # 退款金额
-                    '总GMV': x['商品实际价格(总共)'].sum()                 # 分母：总销售额
+                    '支付总单量(含退)': x['订单号'].count(),                 # 只要付过钱就算
+                    '支付总金额(含退)': x['商品实际价格(总共)'].sum(),      # 总GMV
+                    
+                    '实际净成交(扣退)': x[x['是否有效']]['订单号'].count(), # 扣除退款后的
+                    '实际净营收(扣退)': x[x['是否有效']]['商品实际价格(总共)'].sum(),
+                    
+                    '退款单数': x[x['是否退款']]['订单号'].count(),
+                    '退款金额': x['商品已退款金额'].sum()
                 })
             ).reset_index()
 
-            # 计算退款率 = 退款金额 / 总GMV
-            channel_stats['金额退款率'] = (channel_stats['退款金额'] / channel_stats['总GMV'] * 100).fillna(0)
+            # 5. 计算退款率
+            channel_stats['金额退款率'] = (channel_stats['退款金额'] / channel_stats['支付总金额(含退)'] * 100).fillna(0)
 
-            # 排序
-            channel_stats = channel_stats.sort_values(by='有效成交金额', ascending=False)
+            # 6. 排序 (按支付总金额排序，看谁带货猛)
+            channel_stats = channel_stats.sort_values(by='支付总金额(含退)', ascending=False)
             
-            # 格式化
+            # 7. 格式化
             channel_display = channel_stats.copy()
             channel_display['金额退款率'] = channel_display['金额退款率'].apply(lambda x: f"{x:.2f}%")
-            channel_display['有效成交金额'] = channel_display['有效成交金额'].apply(lambda x: f"¥{x:,.0f}")
-            channel_display['退款金额'] = channel_display['退款金额'].apply(lambda x: f"¥{x:,.0f}")
-            channel_display['有效成交单数'] = channel_display['有效成交单数'].astype(int)
+            
+            for col in ['支付总金额(含退)', '实际净营收(扣退)', '退款金额']:
+                channel_display[col] = channel_display[col].apply(lambda x: f"¥{x:,.0f}")
+            
+            for col in ['支付总单量(含退)', '实际净成交(扣退)', '退款单数']:
+                channel_display[col] = channel_display[col].astype(int)
 
+            # 8. 展示表格 (列出所有关键数据)
             st.dataframe(
-                channel_display[['商品编码(自定义)', '有效成交单数', '有效成交金额', '退款单数', '退款金额', '金额退款率']],
+                channel_display[['商品编码(自定义)', '支付总单量(含退)', '支付总金额(含退)', '实际净成交(扣退)', '实际净营收(扣退)', '金额退款率']],
                 column_config={
-                    "商品编码(自定义)": st.column_config.TextColumn("渠道/主播编码"),
-                    "有效成交单数": st.column_config.NumberColumn("有效成交 (净)", help="实际发货且未退款的单量"),
-                    "有效成交金额": st.column_config.TextColumn("有效营收 (净) 💰", help="扣除退款后的实际营收"),
-                    "金额退款率": st.column_config.TextColumn("金额退款率 ⚠️", help="退款金额 / (有效金额+退款金额)"),
+                    "商品编码(自定义)": st.column_config.TextColumn("渠道/主播"),
+                    "支付总单量(含退)": st.column_config.NumberColumn("支付单量 (含退)", help="只要付过款都算，包含后续退款的"),
+                    "支付总金额(含退)": st.column_config.TextColumn("支付金额 (含退)"),
+                    "实际净成交(扣退)": st.column_config.NumberColumn("净成交 (实)", help="扣除退款后的实际发货单量"),
+                    "实际净营收(扣退)": st.column_config.TextColumn("净营收 (实)"),
+                    "金额退款率": st.column_config.TextColumn("退款率 ⚠️"),
                 },
                 use_container_width=True
             )
@@ -172,24 +174,19 @@ if uploaded_file is not None:
         st.divider()
 
         # ==========================================
-        # 🔥 模块3：有效大单与复购分析 (逻辑同步修正)
+        # 🔥 模块3：有效大单与复购分析 (逻辑保持一致)
         # ==========================================
-        # 这里的“有效”依然指：已付款 且 无退款
-        # 我们直接复用上面的 is_paid 逻辑来做筛选，确保统一
+        # 这里的“有效”指的是：已付款
+        # 如果你想看【含退款】的大单，可以用 paid_orders
+        # 如果你想看【净成交】的大单，可以用 paid_orders[paid_orders['是否有效']]
+        # 既然是分析“大客户”，通常建议看【净成交】（退了的不算大客户）
         
-        # 全局增加是否付款列
-        df['is_paid_global'] = (df['订单实际支付金额'] > 0) | \
-                               (df['商品已退款金额'] > 0) | \
-                               (df['订单状态'].isin(['待发货', '已发货', '已完成']))
-        
-        # 筛选出有效单：付过款 AND 没退款
-        valid_orders_mask = (df['is_paid_global']) & (~refund_mask)
-        valid_orders_df = df[valid_orders_mask].copy()
+        valid_orders_df = paid_orders[paid_orders['是否有效']].copy()
 
         col_left, col_right = st.columns(2)
 
         with col_left:
-            st.markdown("### 🛍️ 有效大单 (已付款无退款)")
+            st.markdown("### 🛍️ 有效大单 (已付款且无退款)")
             multi_item_orders = valid_orders_df[valid_orders_df['商品数量'] > 1]
             if not multi_item_orders.empty:
                 st.info(f"发现 **{len(multi_item_orders)}** 个有效大单：")
