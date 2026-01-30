@@ -182,7 +182,7 @@ if uploaded_file is not None:
                 channel_display[['商品编码(自定义)', '支付总单量(含退)', '支付总金额(含退)', '实际净成交(扣退)', '实际净营收(扣退)', '金额退款率']],
                 column_config={
                     "商品编码(自定义)": st.column_config.TextColumn("渠道/主播"),
-                    "金额退款率": st.column_config.TextColumn("退款率 ⚠️"),
+                    "金额退款率": st.column_config.TextColumn("金额退款率 ⚠️"),
                 },
                 use_container_width=True
             )
@@ -262,3 +262,4 @@ if uploaded_file is not None:
 
     except Exception as e:
         st.error(f"分析出错: {e}")
+
