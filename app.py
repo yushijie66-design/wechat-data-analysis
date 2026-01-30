@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 
 # -------------------------------------------------------------------
-# 微信小店数据分析工具 - v12.0 (全链路数据清洗版)
+# 微信小店数据分析工具 - v13.0 (精准打击刷单版)
 # -------------------------------------------------------------------
 
 st.set_page_config(page_title="微信小店数据分析助手 Pro Max", layout="wide")
 
 st.title("📊 微信小店深度销售分析")
-st.markdown("👉 **数据一致性校验：刷单数据将在所有板块（包括渠道、商品、明细）中被彻底剔除。**")
+st.markdown("👉 **v13.0升级：按【手机号】识别，且涵盖【高频高退款率】(>80%) 的刷单账号，防止漏网之鱼。**")
 
 # 1. 文件上传
 uploaded_file = st.file_uploader("请将 CSV 或 Excel 文件拖入下方框中", type=['csv', 'xlsx'])
@@ -16,7 +16,7 @@ uploaded_file = st.file_uploader("请将 CSV 或 Excel 文件拖入下方框中"
 if uploaded_file is not None:
     try:
         # ==========================================
-        # 1️⃣ 数据读取 (Raw Data)
+        # 1️⃣ 数据读取
         # ==========================================
         if uploaded_file.name.endswith('.csv'):
             try:
@@ -30,12 +30,11 @@ if uploaded_file is not None:
         # ==========================================
         # 2️⃣ 基础预处理
         # ==========================================
-        # 填充缺失值
         raw_df['商品售后'] = raw_df['商品售后'].fillna('无')
         raw_df['商品名称'] = raw_df['商品名称'].fillna('未知商品')
         raw_df['订单状态'] = raw_df['订单状态'].fillna('未知')
         
-        # 自动识别商家编码列
+        # 自动识别商家编码
         code_col = '商品编码(自定义)'
         if code_col not in raw_df.columns:
             possible_cols = ['商家编码', 'SKU编码(自定义)']
@@ -48,7 +47,7 @@ if uploaded_file is not None:
             raw_df[code_col] = raw_df[code_col].fillna('未标记渠道')
             raw_df[code_col] = raw_df[code_col].astype(str).replace(['nan', ''], '未标记渠道')
 
-        # 数值列强制转换
+        # 数值转换
         cols_to_numeric = ['商品数量', '商品已退款金额', '商品实际价格(总共)', '订单实际支付金额']
         for col in cols_to_numeric:
             if col in raw_df.columns:
@@ -60,14 +59,16 @@ if uploaded_file is not None:
             raw_df['商品数量'] = 1
 
         # ==========================================
-        # 3️⃣ 🕵️‍♂️ 刷单识别与剔除 (Cleaning Phase)
+        # 3️⃣ 🕵️‍♂️ 智能刷单识别 (算法升级)
         # ==========================================
         
-        # 构造用户ID (去除空格防止误差)
-        if '收件人姓名' in raw_df.columns and '收件人手机' in raw_df.columns:
-            raw_df['user_id'] = raw_df['收件人姓名'].astype(str).str.strip() + "|" + raw_df['收件人手机'].astype(str).str.strip()
+        # 规则1：按【收件人手机】识别唯一用户 (忽略姓名变化)
+        if '收件人手机' in raw_df.columns:
+            # 去除空格，保证匹配准确
+            raw_df['clean_phone'] = raw_df['收件人手机'].astype(str).str.strip()
         else:
-            raw_df['user_id'] = raw_df.index.astype(str)
+            # 如果没有手机号，回退到姓名 (不推荐，但防止报错)
+            raw_df['clean_phone'] = raw_df['收件人姓名'].astype(str)
 
         # 标记是否退款
         raw_df['is_refund_flag'] = (
@@ -75,40 +76,63 @@ if uploaded_file is not None:
             (raw_df['商品已退款金额'] > 0)
         )
 
-        # 统计用户行为
-        user_stats = raw_df.groupby('user_id').agg(
-            total_count=('订单号', 'count'),
-            refund_count=('is_refund_flag', 'sum')
+        # 统计每个手机号的行为
+        user_stats = raw_df.groupby('clean_phone').agg(
+            total_count=('订单号', 'count'),          # 总单数
+            refund_count=('is_refund_flag', 'sum'),   # 退款单数
+            linked_names=('收件人姓名', 'unique')     # 关联的所有姓名
         ).reset_index()
 
-        # 判定刷单：次数 >=3 且 退款率100%
+        # 规则2：判定标准升级
+        # 满足：下单次数 >= 3 且 退款率 >= 80% (0.8)
+        # 这样可以抓住那些 56单退了52单 的人
         brushing_users = user_stats[
             (user_stats['total_count'] >= 3) & 
-            (user_stats['total_count'] == user_stats['refund_count'])
+            ((user_stats['refund_count'] / user_stats['total_count']) >= 0.8)
         ]
-        brushing_user_ids = brushing_users['user_id'].tolist()
+        
+        brushing_phones = brushing_users['clean_phone'].tolist()
 
-        # 🔥【关键步骤】生成 clean_df
-        # 只有 clean_df 才会被用于后续的所有分析！
-        brushing_df = raw_df[raw_df['user_id'].isin(brushing_user_ids)].copy()
-        clean_df = raw_df[~raw_df['user_id'].isin(brushing_user_ids)].copy()
+        # 数据隔离
+        brushing_df = raw_df[raw_df['clean_phone'].isin(brushing_phones)].copy()
+        clean_df = raw_df[~raw_df['clean_phone'].isin(brushing_phones)].copy()
 
-        # 记录剔除数量
-        removed_count = len(brushing_df)
-        removed_users = len(brushing_users)
+        # 记录数据
+        removed_orders_count = len(brushing_df)
+        removed_users_count = len(brushing_users)
 
-        # 展示刷单警告
+        # 📢 刷单警告区
         if not brushing_df.empty:
-            st.warning(f"⚠️ **已全链路剔除刷单数据**：共隔离 **{removed_users}** 人，涉及 **{removed_count}** 个订单。")
-            with st.expander("查看被剔除的刷单明细 (这些数据将不会出现在下方任何图表中)"):
-                st.dataframe(brushing_df[['订单号', '收件人姓名', '商品名称', '订单实际支付金额', '商品已退款金额', code_col]])
+            st.warning(f"⚠️ **已智能剔除刷单数据**：共发现 **{removed_users_count}** 个异常手机号，涉及 **{removed_orders_count}** 个订单。")
+            
+            with st.expander("🔍 点击查看刷单“黑名单” (姓名/手机/单量)"):
+                st.markdown("**判定标准**：同一手机号下单 ≥ 3次，且退款率超过 80%。")
+                
+                # 整理展示数据
+                show_users = brushing_users.copy()
+                show_users['退款率'] = (show_users['refund_count'] / show_users['total_count'] * 100).apply(lambda x: f"{x:.1f}%")
+                # 把姓名列表转成字符串
+                show_users['曾用名'] = show_users['linked_names'].apply(lambda x: ','.join([str(n) for n in x]))
+                
+                st.dataframe(
+                    show_users[['clean_phone', '曾用名', 'total_count', 'refund_count', '退款率']].rename(columns={
+                        'clean_phone': '手机号',
+                        'total_count': '总下单',
+                        'refund_count': '总退款'
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.markdown("#### 🧾 对应的异常订单明细")
+                st.dataframe(brushing_df[['订单号', '收件人姓名', '收件人手机', '订单状态', '商品售后', '订单实际支付金额']])
         else:
-            st.success("✅ 数据检测完毕：未发现【下单≥3次且全退】的刷单数据。")
+            st.success("✅ 未检测到【高频高退款】的异常刷单数据。")
+
 
         # ==========================================
-        # 4️⃣ 构建分析数据集 (Paid Orders)
+        # 4️⃣ 构建分析数据集 (Paid Orders from Clean Data)
         # ==========================================
-        # 注意：这里使用的是 clean_df，确保源头干净
         
         real_paid_mask = (
             clean_df['订单状态'].isin(['待发货', '已发货', '已完成']) |
@@ -116,10 +140,8 @@ if uploaded_file is not None:
             (clean_df['商品售后'].str.contains('退款完成', na=False))
         )
         
-        # 这里的 paid_orders 已经是剔除了刷单数据的“真实支付订单”
         paid_orders = clean_df[real_paid_mask].copy()
         
-        # 标记属性
         paid_orders['是否退款'] = (
             (paid_orders['商品售后'].str.contains('退款完成', na=False)) | 
             (paid_orders['商品已退款金额'] > 0)
@@ -127,7 +149,7 @@ if uploaded_file is not None:
         paid_orders['是否有效'] = ~paid_orders['是否退款']
 
         # ==========================================
-        # 5️⃣ 核心指标计算 (基于 clean_df)
+        # 5️⃣ 核心指标计算
         # ==========================================
         total_real_orders = len(paid_orders)
         total_real_gmv = paid_orders['商品实际价格(总共)'].sum()
@@ -136,7 +158,6 @@ if uploaded_file is not None:
         refund_count = len(refund_orders)
         refund_amount = refund_orders['商品已退款金额'].sum()
 
-        # 物流统计 (基于 clean_df)
         to_ship_count = len(clean_df[clean_df['订单状态'] == '待发货'])
         to_ship_amount = clean_df[clean_df['订单状态'] == '待发货']['商品实际价格(总共)'].sum()
         
@@ -148,11 +169,11 @@ if uploaded_file is not None:
         rate_amount = (refund_amount / total_real_gmv * 100) if total_real_gmv > 0 else 0
 
         # ==========================================
-        # 📊 模块展示 (All Verified Clean)
+        # 📊 模块展示
         # ==========================================
 
         # --- 模块1：核心看板 ---
-        st.markdown(f"### 💰 核心经营数据 (已剔除 {removed_count} 条刷单)")
+        st.markdown(f"### 💰 核心经营数据 (已剔除 {removed_orders_count} 条刷单)")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("📦 支付总单量", f"{total_real_orders}")
         c2.metric("💰 支付总金额", f"¥ {total_real_gmv:,.0f}")
@@ -167,11 +188,9 @@ if uploaded_file is not None:
         st.divider()
 
         # --- 模块2：渠道业绩透视 ---
-        st.markdown(f"### 🎬 主播/渠道业绩透视 (已剔除 {removed_count} 条刷单)")
-        st.caption("✅ 数据源确认：统计数据已完全排除刷单样本。")
-
+        st.markdown(f"### 🎬 主播/渠道业绩透视 (已剔除 {removed_orders_count} 条刷单)")
+        
         if code_col in clean_df.columns:
-            # 这里的 paid_orders 已经不含刷单数据
             channel_stats = paid_orders.groupby(code_col).apply(
                 lambda x: pd.Series({
                     '支付总单量(含退)': x['订单号'].count(),
@@ -207,7 +226,7 @@ if uploaded_file is not None:
         st.divider()
 
         # --- 模块3：有效大单与复购 ---
-        st.markdown(f"### 🛍️ 大单与复购分析 (已剔除 {removed_count} 条刷单)")
+        st.markdown(f"### 🛍️ 大单与复购分析 (已剔除 {removed_orders_count} 条刷单)")
         valid_orders_df = paid_orders[paid_orders['是否有效']].copy()
         
         col_left, col_right = st.columns(2)
@@ -222,18 +241,22 @@ if uploaded_file is not None:
 
         with col_right:
             st.markdown("#### 有效复购 (回头客)")
-            if '收件人姓名' in clean_df.columns:
-                clean_df['cid'] = clean_df['收件人姓名'].astype(str) + clean_df['收件人手机'].astype(str)
-                # 复购我们只看有效成交的
-                valid_orders_df['cid'] = valid_orders_df['收件人姓名'].astype(str) + valid_orders_df['收件人手机'].astype(str)
-                counts = valid_orders_df['cid'].value_counts()
+            if '收件人手机' in clean_df.columns:
+                # 仅在干净数据里找回头客
+                valid_orders_df['clean_phone'] = valid_orders_df['收件人手机'].astype(str).str.strip()
+                counts = valid_orders_df['clean_phone'].value_counts()
                 repeat = counts[counts > 1]
+                
                 if not repeat.empty:
                     st.warning(f"发现 **{len(repeat)}** 位回头客")
                     rep_list = []
-                    for cid, cnt in repeat.items():
-                        r = valid_orders_df[valid_orders_df['cid'] == cid].iloc[0]
-                        rep_list.append({"收件人": r['收件人姓名'], "手机": str(r['收件人手机'])[-4:], "单数": cnt})
+                    for phone, cnt in repeat.items():
+                        r = valid_orders_df[valid_orders_df['clean_phone'] == phone].iloc[0]
+                        rep_list.append({
+                            "收件人": r['收件人姓名'], 
+                            "手机": str(r['收件人手机'])[-4:], 
+                            "单数": cnt
+                        })
                     st.dataframe(pd.DataFrame(rep_list), hide_index=True)
                 else:
                     st.success("暂无。")
@@ -241,7 +264,7 @@ if uploaded_file is not None:
         st.divider()
 
         # --- 模块4：商品总榜 ---
-        st.markdown(f"### 🏆 商品销售总榜 (已剔除 {removed_count} 条刷单)")
+        st.markdown(f"### 🏆 商品销售总榜 (已剔除 {removed_orders_count} 条刷单)")
         prod_stats = paid_orders.groupby('商品名称').agg({
             '订单号': 'count',
             '商品数量': 'sum',
@@ -250,7 +273,6 @@ if uploaded_file is not None:
         }).rename(columns={'订单号': '支付单数(含退)', '商品数量': '销售总份数'})
         
         prod_stats['金额退款率'] = (prod_stats['商品已退款金额'] / prod_stats['商品实际价格(总共)'] * 100).fillna(0)
-        # 单量退款率
         ref_cnt = paid_orders[paid_orders['是否退款']].groupby('商品名称')['订单号'].count()
         prod_stats['退款单数'] = ref_cnt.fillna(0)
         prod_stats['单量退款率'] = (prod_stats['退款单数'] / prod_stats['支付单数(含退)'] * 100).fillna(0)
